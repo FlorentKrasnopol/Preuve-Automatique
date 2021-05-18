@@ -1,2 +1,6 @@
 # Preuve-Automatique
  Contenu de mon projet de TIPE 2020-2021
+
+L'idée du projet est de permettre à l'ordinateur de construire le squelette de preuve formelle d'un énoncé donné de manière rigoureuse, si elle existe, et de déceler une incapacité à prouver l'énoncé grâce à la cohérence entre les variables. On ne donne pas ici à l'ordinateur les moyens de prouver des énoncés tels que "pour tout x dans R, sin²(x)+cos²(x) = 1" car on ne lui a pas permis de comprendre la sémantique qui se cache au-delà des symboles de relation ; en revanche, ce qu'il sera capable de déceler, c'est l'impossibilité de prouver cet énoncé conjointement à celui-ci : "Il existe y dans R+ tel que sin(y) = 2 et cos(y) = 1". Plus généralement, il proposera, lorsqu'il ne trouve pas d'incohérence pour prouver un résultat, un système d'égalité entre variables (que l'utilisateur devra alors résoudre, pour terminer la preuve). Dans le cas d'énoncés longs et tortueux, il sera d'une aide indéniable.
+
+L'utilisateur est invité à initier sa pratique grâce aux tests des différentes fonctions qu'il peut trouver tout au long du programme. Par ailleurs, tous les types sont rappelés au début du programme.

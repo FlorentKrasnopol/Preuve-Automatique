@@ -1,0 +1,732 @@
+type terme = 
+	|Var of char
+	|Constante of int
+	|Fonction of char * terme list;;
+
+type fpo =
+	|Relation of char * terme list
+	|Et of fpo * fpo
+	|Ou of fpo * fpo
+	|Implique of fpo * fpo
+	|Non of fpo
+	|Existe of int * char * fpo
+	|Tout of int * char * fpo ;;		(*ATTENTION : nécessite de passer de char à var*)
+
+exception Imp;;	(*signifie l'impossibilité d'appliquer une règle*)
+
+exception Occurcheck;; (*dans le cadre de l'unification*)
+exception Clash;;
+
+
+
+(* Fonctions de gestion des files *)
+
+type 'a file = {mutable entree : 'a list ; mutable sortie : 'a list};;
+
+let creer_file_vide () =
+	{entree = [] ; sortie = []};;
+
+let etre_vide f = f.entree = [] && f.sortie = [];;
+
+let enfiler f x = f.entree <- x::f.entree;;
+
+let defiler f =
+	let rec aux ()=
+		match f.entree with
+			|[]	-> ()
+			|t::q -> f.sortie <- t::f.sortie;
+						f.entree <- q;
+						aux()	in if f.sortie = [] then aux ();
+		match f.sortie with
+			|[]	-> failwith "File vide"
+			|x::q -> f.sortie <- q ; x;;
+
+
+
+
+
+
+(* Fonctions classiques et utiles *)
+
+let rec appartient l x =
+	match l with
+		|[]	-> false
+		|t::q when t = x -> true
+		|t::q	-> appartient q x;;
+
+let rec supprimer_liste l x = (*renvoie la liste l sans l'élément x*)
+	match l with
+		|[] -> []
+		|t::q when t = x -> supprimer_liste q x
+		|t::q -> t::(supprimer_liste q x);;
+
+
+
+
+
+(*Fonctions d'affichage*)
+
+let rec affichage_liste_terme l =
+	match l with
+		|[] -> ()
+		|[t] -> affichage_terme t
+		|t::q -> affichage_terme t;print_char ',';affichage_liste_terme q
+and affichage_terme t =
+	match t with
+		|Constante c -> print_int c
+		|Var x -> print_char x
+		|Fonction(f,[]) -> print_char f;print_string "()"
+		|Fonction(f,[t]) -> print_char f ;print_string "(";affichage_terme t;print_string ")"
+		|Fonction(f,t::q) -> print_char f;print_string "(";affichage_terme t;print_char ',';affichage_liste_terme q;print_string ")";;
+
+let rec affichage_fpo a =
+	match a with 
+		|Relation(r,[]) -> print_char r ;print_string "()"
+		|Relation(r,[t]) -> print_char r ;print_string "(";affichage_terme t;print_string ")"
+		|Relation(r,t::q) -> print_char r ;print_string "(";affichage_terme t;print_char ',';affichage_liste_terme q;print_string ")"
+		|Et(f,g) -> affichage_fpo f ; print_string "et" ; affichage_fpo g
+		|Ou(f,g) -> affichage_fpo f ; print_string "ou"; affichage_fpo g
+		|Implique(f,g) -> affichage_fpo f ; print_string "-->";affichage_fpo g
+		|Non(f) -> print_string "Non(";affichage_fpo f;print_string ")"
+		|Existe(n,x,f) -> print_string "Il existe ";print_char x;print_string " (";print_int n;print_string "), ";affichage_fpo f
+		|Tout(n,x,f) -> print_string "Pour tout ";print_char x;print_string " (";print_int n;print_string "), ";affichage_fpo f;;
+
+let rec affichage_liste_fpo la =	
+	match la with
+			|[] -> ()
+			|[a] -> affichage_fpo a
+			|a::q -> affichage_fpo a ; print_char ',' ; affichage_liste_fpo q;;
+
+let rec affichage_seq s = (*affiche un séquent*)
+	let (g,d) = s in affichage_liste_fpo g ; print_string " SEQ " ; affichage_liste_fpo d;;
+
+let rec affichage_liste_seq ls = 
+	match ls with
+		|[]   -> ()
+		|[s]  -> affichage_seq s
+		|s::q -> affichage_seq s;
+					print_string "\n";
+					affichage_liste_seq q;;
+
+
+let rec affichage_unif u =
+	match u with 
+		|[] -> ()
+		|(Var x,t)::q -> print_newline();
+							print_char x ;
+							print_string ":=";
+							affichage_liste_terme [t];
+							affichage_unif q;;
+
+
+
+
+
+
+
+
+
+
+let rec couples e lf lg =  (* renvoie la liste e concaténée (à gauche, et... dans l'ordre inverse) avec tous les couples d'éléments "semblables" de lf et de lg*)
+	match (lf,lg) with
+		|([],[]) -> e
+		|(tf::qf,tg::qg) -> couples ((tf,tg)::e) qf qg;;
+
+let rec appartient_term t v = (*renvoie true si la variable v est dans le terme t*)
+	match t with
+		|Constante(_) -> false
+		|Var _ as u -> if u = v then true
+											else false
+		|Fonction(f,[])	-> false
+		|Fonction(f,tt::qt) -> appartient_term tt v  || appartient_term (Fonction(f,qt)) v;;
+
+
+let rec substituer_terme t x y =	(*renvoie t[x:=y] | x et y sont des termes *)
+	match t with
+		|t when t = x	-> y
+		|Var s -> Var s
+		|Constante c -> Constante c
+		|Fonction(f,[])	->	Fonction(f,[])
+		|Fonction(f,tt::qt)	-> let Fonction(_,new_q) = substituer_terme (Fonction(f,qt)) x y in
+												Fonction(f,(substituer_terme tt x y)::new_q);;
+
+
+let rec substituer_eq e v u =	(*renvoie e[v:=u]*) (* c'est une substitution pour un couple*)
+	match e with
+		|[] -> []
+		|(c1,c2)::q -> if appartient_term c1 v || appartient_term c2 v then ((substituer_terme c1 v u),(substituer_terme c2 v u))::(substituer_eq q v u)
+							else (c1,c2)::q;;
+
+
+let rec appartient_formule f v = (*idem pour une fpo*)
+	match f with
+		|Relation(_,[]) -> false
+		|Relation(r,tt::qt)	-> let boo = appartient_term tt v in boo||appartient_formule (Relation(r,qt)) v
+		|Et(f,g)	-> appartient_formule f v || appartient_formule g v
+		|Ou(f,g)	-> appartient_formule f v || appartient_formule g v
+		|Implique(f,g)	-> appartient_formule f v || appartient_formule g v
+		|Non(f)	-> appartient_formule f v
+		|Existe(_,_,f)	-> appartient_formule f v
+		|Tout(_,_,f)	-> appartient_formule f v;;
+
+let rec appartient_sequent s v = (*renvoie true si et seulement si la variable v est dans le séquent s*)
+	match s with
+		|[],[] -> false
+		|tg::qg,[] -> appartient_formule tg v || appartient_sequent (qg,[]) v
+		|[],td::qd -> appartient_formule td v || appartient_sequent ([],qd) v
+		|tg::qg,td::qd -> appartient_formule tg v || appartient_formule td v || appartient_sequent (qg,qd) v;;
+
+
+let composition x u sigma = (*renvoie, si possible, [x:=u] o sigma ; x est une VARIABLE*)
+	if x = u then sigma (*c'est la composition par l'identité*)
+	else
+		let rec aux sigma boo = (*boo indique si x était un point fixe de sigma, c'est-à-dire s'il était ou non présent dans la permutation*)
+			match sigma with
+				|[] -> if boo then [] else [(x,u)]
+				|(v,ter)::q when v = x -> if ter = u then (v,ter)::aux q true
+																	else raise Occurcheck
+				|(v,ter)::q (*la substitution est peut-être triviale mais peu importe*) -> let new_ter = substituer_terme ter x u in if new_ter = v then aux q boo
+																																						else if appartient_term new_ter v then raise Occurcheck				
+																																							else (v,new_ter)::(aux q boo)
+		in aux sigma false;;
+
+
+(* exemple *)
+let c = composition (Var 'x') (Fonction('g',[Fonction('f',[Constante 0 ; Var ('y')]) ; Var 'y'])) [(Var 'y',Fonction('g',[Constante 1]));(Var 'z',Fonction('f',[Constante 5 ; Var 'x']))]	;;
+affichage_unif c;;
+
+ 	
+let rec unification e sigma =	(*renvoie le mgu de e, une liste d'équations terme ~ terme*)
+	match e with
+		|[] -> sigma
+		|(Constante x, Constante y)::q -> if x <> y then raise Clash
+													else unification q sigma
+		|(Fonction(f,lf),Fonction(g,lg))::q -> if f <> g then raise Clash	
+																else unification (couples q lf lg) sigma
+		|(Var x, Var y)::q when x = y -> unification q sigma
+		|(Var x, u)::q -> if not (appartient_term u (Var x)) then let new_sigma = composition (Var x) u sigma
+																				and new_e = substituer_eq q (Var x) u
+																					in unification new_e new_sigma
+									else raise Occurcheck
+		|(u, Var x)::q -> unification ((Var x,u)::q) sigma
+		|_ -> raise Clash (*ce filtrage ramasse les clash issue de l'unification d'une constante et d'une fonction*);;
+
+(* tests *)
+
+			let t1 = Fonction('g',[Var 'z']);;
+			let t2 = Fonction('p',[Var 'a']);;
+		 	let t3 = Fonction('w',[Var 't']);;
+		 	let e = [(Var 'a',t1);(Var 't',t2);(Var 'z',t3)];;			
+			unification [(Var 'a',t1);(Var 't',t2);(Var 'z',t3)] [];;
+			let t1 = Fonction('f',[Var 'x';Var 'x';Var 'y']);;
+			let t2 = Fonction('f',[Fonction('f',[Var 'y' ; Var 'y' ; Var 'z']);Fonction('f',[Var 'y' ; Var 'y' ; Var 'z']);Var 'a']);;
+			let s = unification [(t1,t2)] [];;
+
+
+			let ts1 = Var 'x';;
+			let ts2 = Var 'y';;
+			let ts3 = Fonction('g',[Var 'x']);;
+			let ts4 = Fonction('h',[Var 'y']);;
+			let s1 = unification [(ts1,ts3)] [];;
+			let s2 = unification [(ts1,ts4)] [];;
+			let s3 = unification [(ts2,ts3)] [];;
+			let s4 = unification [(ts2,ts4)] [];;
+
+
+
+let rec evaluer a x y = (*renvoie A[x:=y]	| x et y sont des termes *)
+	match a with
+		|Relation(r,[])->	Relation(r,[])
+		|Relation(r,t::q) -> let Relation(_,new_q) = evaluer (Relation(r,q)) x y in
+ 										 Relation(r, (substituer_terme t x y)::new_q)
+		|Et(f,g) -> Et((evaluer f x y),(evaluer g x y))
+		|Ou(f,g)	-> Ou((evaluer f x y),(evaluer g x y))
+		|Implique(f,g)	-> Implique((evaluer f x y),(evaluer g x y))
+		|Non(f)	-> Non(evaluer f x y)
+		|Existe(n,s,f)	-> Existe(n,s,(evaluer f x y))		(* Pas de problème s = x ou s = y puisqu'on gère PAR AILLEURS la liberté des variables*)
+		|Tout(n,s,f)		-> Tout(n,s,(evaluer f x y));;
+
+
+let rec seq_substituer_t seq sigma1 = (*sigma1 est un seul élément de sigma, un couple (terme * terme)*)
+	let (Var x,t) = sigma1 in
+		match seq with
+			|([],[]) -> ([],[])
+			|([],td::qd) -> let (g,d) = seq_substituer_t ([],qd) sigma1
+								in
+								([],(evaluer td (Var x) t)::d)
+			|(tg::qg,[]) -> let (g,d) = seq_substituer_t (qg,[]) sigma1
+								in 
+								((evaluer tg (Var x) t)::g),[]
+			|(tg::qg,td::qd) -> let (g,d) = seq_substituer_t (qg,qd) sigma1
+								in 
+			 					((evaluer tg (Var x) t)::g),(evaluer td (Var x) t)::d;;
+		
+let rec seq_substituer seq sigma = (*renvoie seq[sigma]*)	(*ATTENTION : coûteux*)
+	match sigma with
+		|[] -> seq
+		|e::q -> seq_substituer (seq_substituer_t seq e) q;;
+
+let rec chercher_premiere_comp l x = (*renvoie la liste des deuxièmes composantes des couples (x,_) présents dans l*)
+	match l with
+		|[] -> []
+		|(y,z)::q when y = x -> z::(chercher_premiere_comp q x)
+		|_::q -> chercher_premiere_comp q x;;
+
+
+let rec jointure t l = (*renvoie la liste des listes t::q où q est une liste de l*)
+	match l with
+	|[] -> []
+	|tl::ql -> (t::tl)::(jointure t ql);;
+	
+let rec tout_couple x l = (*renvoie la liste de toutes les listes réduites aux couples (x,b) où b est un élément de l*)
+	match l with
+		|[] -> []
+		|b::q -> [(x,b)]::tout_couple x q;;
+
+let toutes_les_jointures la lb = (*renvoie la liste de toutes les associations d'éléments de la à ceux de lb 2 à 2 *)
+	let rec aux la b_deb b_fin =
+		match la,b_deb with
+			|[],_ -> []
+			|([x],b) -> tout_couple x b
+			|_,[] -> []
+			|t::q,b::qb -> (jointure (t,b) (aux q (qb@b_fin) []))
+								@ (aux la qb (b::b_fin))
+								
+	in if List.length la < List.length lb then aux la lb []
+													else aux lb la [];;
+
+
+let mgu_dans_relation ltg ltd sigma =	(*renvoie le mgu de l'unification de deux arguments d'un même symbole de relations, s'il existe une permutation telle qu'ils soient unifiables*)
+	let rec depiler le boo sigma =
+		match le with
+			|[] -> if boo then raise Occurcheck
+								else raise Clash
+			|e::q -> try (let mgu = unification e sigma in mgu) with 
+							|Occurcheck -> depiler q true sigma
+							|Clash -> depiler q false sigma
+		in depiler (toutes_les_jointures ltg ltd) true sigma;; (*on n'a pas besoin de réaliser toutes les jointures car les arguments ne commutent pas dans les relations*)
+
+
+(* test *)
+let c = mgu_dans_relation [Fonction('f',[Var 'a'])] [Fonction('f',[Var 'b'])] [(Var 'c',Var 'a')];;
+
+(*mgu_dans_relation ne sert que pour les symboles de relation dont les arguments commutent : ce n'est pas le cas de tous, donc on ne l'utilise pas et on préfère revenir au cas général avec les fonctions suivantes*)
+
+
+(* cette fonction est certainement une des clefs du programme : elle n'arrive pourtant qu'à la fin de le résolution, c'est-à-dire une fois que l'ordinateur a "remonté" une piste de démonstration qui
+l'a mené à des séquents constitués seulement de formules atomiques : dès lors, il convient d'unifier ces séquents, c'est-à-dire de vérifier la compatibilité des variables qu'ils mettent en jeu.
+C'est ce que fait cette fonction. *)
+
+let unification_liste_seq ls = (*renvoie l'unification da la liste de séquents ls BACKTRACKING*)
+	let rec avance tg qg td boo sigma = (*boo vaut true si et seulement la dernière exception rencontrée est l'Occur Check ; renvoie, si possible, l'unification de la RELATION td à une des RELATIONS de la liste tg::qg*)
+		let Relation(rg,ltg) = tg and Relation(rd,ltd) = td in
+											if rg = rd then (*les deux symboles sont alors de même arité*)
+															try (let mgu = unification (couples [] ltg ltd) sigma
+																in mgu) with
+															|Occurcheck -> if qg = [] then 
+																				raise Occurcheck
+																				
+																				else
+																					let tg2::qg2 = qg
+																					in avance tg2 qg2 td boo sigma
+															|Clash -> if qg = [] then
+											
+																				raise Clash
+																				
+																					else
+																						let tg2::qg2 = qg
+																						in avance tg2 qg2 td boo sigma
+											else if qg = [] then if boo then raise Occurcheck
+																					else raise Clash
+																	else let tg2::qg2 = qg
+																			in avance tg2 qg2 td boo sigma
+	in let rec aux ls sigma boo = 
+		match ls with
+			|[] -> sigma
+			|([],[])::q -> if boo then raise Occurcheck
+									else raise Clash (*obtenu si le séquent à prouver comporte un gamma vide, et est donc non prouvable prouvable*) 
+			|(gamma,[])::q -> if boo then raise Occurcheck (*remontée impossible*)
+										else raise Clash
+			|([],delta)::q -> if boo then raise Occurcheck (*Mais à quoi correspond ce cas ?*)
+										else raise Clash
+			|(tg::qg,td::qd)::q -> let gamma = tg::qg
+											and delta = td::qd
+																in 
+								try (let mgu = avance tg qg td boo sigma
+											in aux q mgu boo) (*C'EST LA que le parcours en profondeur AVANCE*)
+								with
+									|Occurcheck -> aux ((gamma,qd)::q) sigma true
+									|Clash -> aux ((gamma,qd)::q) sigma false
+	in aux ls [] false;;								
+
+
+
+
+(* Fonctions d'application des règles de démonstation *)
+
+(*chaque fonction renvoie un couple (g,d) tel que g est la liste des prémisses prouvables si et seulement si les formules de d le sont*)
+
+let rec cong gamma delta =
+	match gamma with
+		|[]	 -> raise Imp
+		|Et(a,b)::q -> (a::(b::q),delta)
+		|t::q	-> let (g,_) = cong q delta in (t::g,delta);;
+
+let rec cond gamma delta =
+	match delta with
+		|[]	-> raise Imp
+		|Et(a,b)::q -> ((gamma,a::q),(gamma,b::q))
+		|t::q	-> let ((_,d1),(_,d2)) = cond gamma q in ((gamma,t::d1),(gamma,t::d2));;
+
+let rec disg gamma delta =
+	match gamma with
+		|[]	 -> raise Imp
+		|Ou(a,b)::q	-> ((a::q,delta),(b::q,delta))
+		|t::q	-> let ((g1,_),(g2,_)) = disg q delta in ((t::g1,delta),(t::g2,delta));;
+
+let rec disd gamma delta =
+	match delta with
+		|[] -> raise Imp
+		|Ou(a,b)::q	-> (gamma,a::(b::q))
+		|t::q -> let (_,d) = disd gamma q in (gamma,t::d);;
+
+let rec impg gamma delta =
+	match gamma with
+		|[]	-> raise Imp
+		|Implique(a,b)::q	-> ((q,a::delta),(b::q,delta))
+		|t::q	-> let ((g1,d1),(g2,d2)) = impg q delta in ((t::g1,d1),(t::g2,d2));;
+
+let rec impd gamma delta =
+	match delta with
+		|[]	-> raise Imp
+		|Implique(a,b)::q	-> (a::gamma,b::q)
+		|t::q	-> let (g,d) = impd gamma q in (g,t::d);;
+
+let rec nong gamma delta =
+	match gamma with
+		|[]	-> raise Imp
+		|Non(a)::q	-> (q,a::delta)
+		|t::q	-> let (g,d) = nong q delta in (t::g,d);;
+
+let rec nond gamma delta =
+	match delta with
+		|[]	 -> raise Imp
+		|Non(a)::q	-> (a::gamma,q)
+		|t::q	-> let (g,d) = nond gamma q in (g,t::d);;
+
+		
+(*on utilise une structure de files pour contenir les variables non utilisées ; les variables non utilisées sont introduites lors de l'application des règles Pour tout/ Il existe*)
+
+
+
+let alphabet = ['x';'y';'z';'t';'a';'b';'c';'n';'m';'k';'i';'j';'l'];;
+let alphabet_gros = ['f';'g';'h';'u';'v';'w';'o';'p';'q'];;
+let naturels = 
+	let rec remplir n = 
+		match n with
+			|5000 -> []
+			|_ -> n::remplir (n+1)
+		in remplir 0;;
+
+
+let rec creer_variables l=
+		match l with
+		|[] -> []
+		|t::q -> Var t :: creer_variables q;;
+
+let v = creer_variables alphabet;; (*crée une liste GLOBALE de variables*)
+
+let symboles_fonction = alphabet_gros;; (*crée une liste GLOBALE de CHAR de fonction*)
+
+
+let creer_rest a = (*renvoie une nouvelle file remplie avec les CHAR des variables de L non utilisées dans a*)
+		let rest_vari = creer_file_vide () in
+				let rec aux lvar =
+					match lvar with
+						|[] -> rest_vari
+						|x::q when appartient_formule a x	-> aux q
+						|x::q -> let Var s = x in enfiler rest_vari s ; aux q
+			 in aux v;;
+
+	let form = Relation('r',[t1;t2]);; (*exemple*)
+
+let creer_rest_s seq = (*idem, mais cette fois cela s'applique à un séquent*)
+	let rest_vari = creer_file_vide () in
+			let rec aux lvar =
+				match lvar with
+					|[] -> rest_vari
+					|x::q when appartient_sequent seq x	-> aux q
+					|x::q -> let Var s = x in enfiler rest_vari s ; aux q
+		 in aux v;;
+
+
+let rec appartient_terme_f t f = (*renvoie true si et seulement si le CHAR f est un caractère de formule dans t*)
+	match t with
+		|Constante c -> false
+		|Var x -> false
+		|Fonction(i,_) when i = f -> true
+		|Fonction(_,[]) -> false
+		|Fonction(i,t::q) -> let boo = appartient_terme_f t f in boo || (appartient_terme_f (Fonction(i,q)) f);;
+
+let rec appartient_formule_f a f = (*renvoie true si et seulement si le CHAR f est un caractère de formule dans a*)
+	match a with
+		|Relation(r,[]) -> false
+		|Relation(r,t::q) -> let boo = appartient_terme_f t f in boo||(appartient_formule_f (Relation(r,q)) f)
+		|Et(k,g) -> (appartient_formule_f k f)||(appartient_formule_f g f)
+		|Ou(k,g) -> (appartient_formule_f k f)||(appartient_formule_f g f)
+		|Implique(k,g) -> (appartient_formule_f k f)||(appartient_formule_f g f)
+		|Non(g) -> appartient_formule_f g f
+		|Tout(_,_,g) -> appartient_formule_f g f
+		|Existe(_,_,g) -> appartient_formule_f g f;;
+
+let rec appartient_sequent_f s f = (*renvoie true si et seulement si le CHAR f est un caractère de formule du séquent s*)
+	match s with
+		|[],[] -> false
+		|tg::qg,[] -> appartient_formule_f tg f || appartient_sequent_f (qg,[]) f
+		|[],td::qd -> appartient_formule_f td f || appartient_sequent_f ([],qd) f
+		|tg::qg,td::qd -> appartient_formule_f tg f || appartient_formule_f td f || appartient_sequent_f (qg,qd) f;;
+
+
+let creer_rest_f a = (*renvoie une nouvelle file remplie avec les CHAR des fonctions de L(F) non utilisées dans a*)
+	let rest_f = creer_file_vide () in
+			let rec aux lchar =
+				match lchar with
+					|[] -> rest_f
+					|x::q when appartient_formule_f a x	-> aux q
+					|x::q -> enfiler rest_f x ; aux q
+		 in aux symboles_fonction;;
+
+
+
+let creer_rest_f_s seq = (*idem, mais cette fois cela s'applique à un séquent*)
+	let rest_f = creer_file_vide () in
+			let rec aux lchar =
+				match lchar with
+					|[] -> rest_f
+					|x::q when appartient_sequent_f seq x	-> aux q
+					|x::q -> enfiler rest_f x ; aux q
+		 in aux symboles_fonction;;
+
+
+
+let rec appartient_terme_c t c = (*renvoie true si et seulement si la CONSTANTE c est une constante dans t*)
+	match t with
+		|Constante c2 -> c = c2
+		|Var x -> false
+		|Fonction(_,[]) -> false
+		|Fonction(i,t::q) -> let boo = appartient_terme_c t c in boo || appartient_terme_c (Fonction(i,q)) c;;
+
+let rec appartient_formule_c a c = (*renvoie true si et seulement si la CONSTANTE c est une constante dans a*)
+	match a with
+		|Relation(r,[]) -> false
+		|Relation(r,t::q) -> let boo = appartient_terme_c t c in boo||(appartient_formule_c (Relation(r,q)) c)
+		|Et(k,g) -> (appartient_formule_c k c)||(appartient_formule_c g c)
+		|Ou(k,g) -> (appartient_formule_c k c)||(appartient_formule_c g c)
+		|Implique(k,g) -> (appartient_formule_c k c)||(appartient_formule_c g c)
+		|Non(g) -> appartient_formule_c g c
+		|Tout(_,_,g) -> appartient_formule_c g c
+		|Existe(_,_,g) -> appartient_formule_c g c;;
+
+
+let rec appartient_sequent_c s c = (*renvoie true si et seulement si la CONSTANTE c est dans le séquent s*)
+	match s with
+		|[],[] -> false
+		|tg::qg,[] -> appartient_formule_c tg c || appartient_sequent_c (qg,[]) c
+		|[],td::qd -> appartient_formule_c td c || appartient_sequent_c ([],qd) c
+		|tg::qg,td::qd -> appartient_formule_c tg c || appartient_formule_c td c || appartient_sequent_c (qg,qd) c;;
+
+
+let creer_rest_c a = (*renvoie une nouvelle file remplie avec les CONSTANTES non utilisées dans a*)
+	let rest_c = creer_file_vide () in
+			let rec aux lconst =
+				match lconst with
+					|[] -> rest_c
+					|x::q when appartient_formule_c a x	-> aux q
+					|x::q -> enfiler rest_c x ; aux q
+		 in aux naturels;;
+
+
+
+let creer_rest_c_s seq = (*idem, mais cette fois cela s'applique à un séquent*)
+	let rest_c = creer_file_vide () in
+			let rec aux lconst =
+				match lconst with
+					|[] -> rest_c
+					|x::q when appartient_sequent_c seq x	-> aux q
+					|x::q -> enfiler rest_c x ; aux q
+		 in aux naturels;;
+
+
+let rec sans_doublon l = (*élimine les doublons de la liste l ATTENTION : coûteux O()*)
+	match l with
+		|[] -> []
+		|t::q -> let lq = sans_doublon q in
+					if appartient lq t then lq
+											else t::lq;;
+
+	
+let rec vari_terme t = (*renvoie la liste des variables d'un terme*)
+	match t with
+		|Var x -> [Var x]
+		|Constante c -> []
+		|Fonction(f,[])-> []
+		|Fonction(f,t::q) -> let lv = vari_terme t in lv @ vari_terme (Fonction(f,q));;
+
+
+let vari_libres a = (*renvoie la liste des variables libres d'une formule*)
+	let rec avec_doublon a =
+		match a with
+			|Relation(r,[])-> []
+			|Relation(r,t::q) -> let lv = vari_terme t in lv @ avec_doublon (Relation(r,q))
+			|Et(f,g) -> avec_doublon f @ avec_doublon g
+			|Ou(f,g)	-> avec_doublon f @ avec_doublon g
+			|Implique(f,g)	-> avec_doublon f @ avec_doublon g
+			|Non(f) 	-> avec_doublon f
+			|Tout(n,x,f)	-> supprimer_liste (avec_doublon f) (Var x)
+			|Existe(n,x,f)	-> supprimer_liste (avec_doublon f) (Var x)
+	in sans_doublon(avec_doublon a);;
+
+
+
+(* les quatre règles majeures : Pour tout et Il existe (dans les conclusions, ou les prémisses)*)
+
+(*les files considérées dans les 4 règles suivantes sont GLOBALES*)
+
+let rec toutg gamma delta rest_vari =
+	match gamma with
+		|[]	-> raise Imp
+		|Tout(1,x,a)::q -> (evaluer a (Var x) (Var(defiler rest_vari)))::q,delta
+		|Tout(n,x,a)::q	 -> ((evaluer a (Var x) (Var(defiler rest_vari)))::((Tout((n-1),x,a)):: q),delta)
+		|t::q -> let (g,_) = toutg q delta rest_vari in (t::g,delta);;
+
+let rec existed gamma delta rest_vari =
+	match delta with
+		|[]	-> raise Imp
+		|Existe(1,x,a)::q -> (gamma,(evaluer a (Var x) (Var(defiler rest_vari)))::q)
+		|Existe(n,x,a)::q	-> (gamma,(evaluer a (Var x) (Var(defiler rest_vari)))::(Existe((n-1),x,a))::q)
+		|t::q	-> let (_,d) = existed gamma q rest_vari in (gamma,t::d);;
+
+let rec touts gamma delta rest_f rest_c =	(*rest_f est la pile des symboles de fonctions*)
+	match delta with
+		|[]	-> raise Imp
+		|Tout(_,x,a)::q	-> let l = supprimer_liste (vari_libres a) (Var x)
+										in if l = [] then let d = evaluer a (Var x) (Constante(defiler rest_c)) in gamma,d::q (*cas d'une fonction sans argument*)
+											else let d = evaluer a (Var x) (Fonction((defiler rest_f),l)) in
+									(gamma,d::q)
+	
+		|t::q	-> let (_,d) = touts gamma q rest_f rest_c in (gamma,t::d);;
+
+
+
+let rec existes gamma delta rest_f rest_c =
+	match gamma with
+		|[] -> raise Imp
+		|Existe(_,x,a)::q	-> let l = supprimer_liste (vari_libres a) (Var x)
+									in if l = [] then let d = evaluer a (Var x) (Constante(defiler rest_c)) in d::q,delta
+											else let g = evaluer a (Var x) (Fonction((defiler rest_f),l)) in
+									(g::q,delta)
+		|t::q	-> let (g,_) = existes q delta rest_f rest_c in (t::g,delta);;
+
+
+let est_atomique a =	(*renvoie true si et seulement si la formule a est atomique*)
+	match a with
+		|Relation(_,_) -> true
+		|_ -> false;;
+
+let rec est_atomique_lf la = (*renvoie true si et seulement si toutes les formules de la liste le sont*)
+	match la with
+		|[] -> true
+		|a::q -> let boo = est_atomique a in boo&&(est_atomique_lf q);;
+
+
+(* la fonction qui construit le cheminement de la preuve, si elle existe *)
+
+let methode_tableaux gamma delta = (*renvoie une liste de séquents S résultant de la méthode des tableaux*)
+	let rest_f = creer_rest_f_s (gamma,delta)
+	and rest_vari = creer_rest_s (gamma,delta)
+	and rest_c = creer_rest_c_s (gamma,delta)
+	in let rec aux i gamma delta =	(*renvoie une liste de séquents dont chacune des formules est atomique si l'algorithme aboutit, la liste vide sinon*)
+		if est_atomique_lf gamma && est_atomique_lf delta then [(gamma,delta)]
+		else
+		match i with
+			|1	-> let l = try (let (g,d) = cong gamma delta in aux 1 g d) with Imp -> (aux (i+1) gamma delta)
+							in l
+			|2 -> let l = try (let (g1,d1),(g2,d2) = cond gamma delta in (aux 1 g1 d1)@(aux 1 g2 d2)) with Imp -> (aux (i+1) gamma delta) 
+							in l
+			|3	-> let l = try (let (g1,d1),(g2,d2) = disg gamma delta in (aux 1 g1 d1)@(aux 1 g2 d2)) with Imp -> (aux (i+1) gamma delta) 
+							in l
+			|4	-> let l = try (let (g,d) = disd gamma delta in aux 1 g d) with Imp -> (aux (i+1) gamma delta) 
+							in l
+			|5	-> let l = try (let (g1,d1),(g2,d2) = impg gamma delta in (aux 1 g1 d1)@(aux 1 g2 d2)) with Imp -> (aux (i+1) gamma delta) 
+							in l
+			|6	-> let l = try (let (g,d) = impd gamma delta in aux 1 g d) with Imp -> (aux (i+1) gamma delta) 
+							in l
+			|7	-> let l = try (let (g,d) = nong gamma delta in aux 1 g d) with Imp -> (aux (i+1) gamma delta) 
+							in l
+			|8	-> let l = try (let (g,d) = nond gamma delta in aux 1 g d) with Imp -> (aux (i+1) gamma delta) 
+							in l
+			|9	-> let l = try (let (g,d) = toutg gamma delta rest_vari in aux 1 g d) with Imp -> (aux (i+1) gamma delta) 
+							in l
+			|10	-> let l = try (let (g,d) = existed gamma delta rest_vari in aux 1 g d) with Imp -> (aux (i+1) gamma delta) 
+							in l
+			|11	 -> let l = try (let (g,d) = touts gamma delta rest_f rest_c in aux 1 g d) with Imp -> (aux (i+1) gamma delta) 
+							in l
+			|12	 -> let l = try (let (g,d) = existes gamma delta rest_f rest_c in aux 1 g d) with Imp -> (aux (i+1) gamma delta) 
+							in l
+
+			|13	 -> []
+	
+	in aux 1 gamma delta;;
+
+
+
+
+
+(*Tests*)
+
+let gamma = [];;
+
+let delta35 = [Existe(1,'x',Implique(Relation('R',[Var 'x']),Tout(1,'y',Relation('R',[Var 'x']))))];;
+let delta36 = [Implique(Existe(1,'x',Relation('R',[Var 'x'])),Tout(1,'y',Relation('R',[Var 'y'])))];;
+let delta383 = [Existe(3,'x',Tout(1,'y',(Implique(Implique(Implique(Relation('R',[Fonction('f',[Var 'x'])]),Relation('R',[Fonction('f',[Var 'y'])])),Relation('R',[Var 'x'])),Relation('R',[Var 'y'])))))];;
+let delta382 = [Existe(2,'x',Tout(1,'y',(Implique(Implique(Implique(Relation('R',[Fonction('f',[Var 'x'])]),Relation('R',[Fonction('f',[Var 'y'])])),Relation('R',[Var 'x'])),Relation('R',[Var 'y'])))))];;
+let delta381 = [Existe(1,'x',Tout(1,'y',(Implique(Implique(Implique(Relation('R',[Fonction('f',[Var 'x'])]),Relation('R',[Fonction('f',[Var 'y'])])),Relation('R',[Var 'x'])),Relation('R',[Var 'y'])))))];;
+let delta37 = [Existe(2,'x',Implique(Relation('R',[Var 'x';Var 'x']),Tout(1,'y',Relation('R',[Var 'x'; Var 'y']))))];;
+
+let delta782 = [Non(Existe(1,'x',Tout(1,'y',(Et(Implique(Relation('R',[Var 'x'; Var 'y']),Non(Relation('R',[Var 'x';Var 'x']))),Implique(Non(Relation('R',[Var 'x' ; Var 'x'])),Relation('R',[Var 'y';Var 'x'])))))))];;
+
+let equiv f1 f2 = 
+	Et(Implique(f1,f2),Implique(f2,f1));;
+	
+let delta783 = [Implique(Tout(1,'z',(Existe(1,'y',(Tout(1,'x',(equiv (Relation('R',[Var 'x' ; Var 'y'])) (Et(Relation('R',[Var 'x' ; Var 'z']),Non(Relation('R',[Var 'x';Var 'x'])))))))))),Non(Existe(1,'a',(Tout(1,'t',(Relation('R',[Var 't' ; Var 'a'])))))))];;
+
+affichage_liste_seq [(gamma,delta783)];; (*il va falloir revoir les fonctions d'affichage de séquents...*)
+let ls35 = methode_tableaux gamma delta35;;
+let u35 = unification_liste_seq ls35;;
+
+let ls36 = methode_tableaux gamma delta36;;
+let u36 = unification_liste_seq ls36;;
+
+let ls381 = methode_tableaux gamma delta381;;
+let ls382 = methode_tableaux gamma delta382;;
+let ls383 = methode_tableaux gamma delta383;;
+affichage_liste_seq ls383;;
+let u381 = unification_liste_seq ls381;;
+let u382 = unification_liste_seq ls382;;
+let u383 = unification_liste_seq ls383;;
+
+
+let ls782 = methode_tableaux gamma delta782;;
+let u782 = unification_liste_seq ls782;;
+
+let ls783 = methode_tableaux gamma delta783;;
+affichage_liste_seq ls783;;
+let u783 = unification_liste_seq ls783;;
+
+
+
+let gamma = [];;
+let delta = [Implique(Tout(1,'y',Relation('R',[Var 'y'])),Existe(1,'x',Relation('R',[Fonction('f',[Var 'x'])])))];;
+
+let ls = methode_tableaux gamma delta;;
+let u = unification_liste_seq ls;;
